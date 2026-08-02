@@ -1311,6 +1311,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_conical_enabled"
             || opt_key == "support_conical_angle"
             || opt_key == "support_conical_min_width"
+            || opt_key == "support_conical_base_flare_width"
+            || opt_key == "support_conical_base_flare_height"
             || opt_key == "independent_support_layer_height" // Orca
             || opt_key == "support_threshold_angle"
             || opt_key == "support_threshold_overlap"

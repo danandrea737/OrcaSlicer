@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 
@@ -36,7 +37,7 @@ TEST_CASE("Enforced support layers are generated", "[SupportMaterial]")
     REQUIRE(enforced.objects().front()->support_layers().size() > 0);
 }
 
-TEST_CASE("Conical grid support narrows toward the build plate", "[SupportMaterial]")
+TEST_CASE("Conical grid support and its base flare taper progressively", "[SupportMaterial]")
 {
     // Model the same broad slab on a narrow central pillar used for manual
     // verification. Grid support used to erase each small per-layer offset.
@@ -61,7 +62,9 @@ TEST_CASE("Conical grid support narrows toward the build plate", "[SupportMateri
         { "support_on_build_plate_only",   1 },
         { "support_remove_small_overhang", 0 },
         { "support_conical_angle",         30 },
-        { "support_conical_min_width",     5 }
+        { "support_conical_min_width",     5 },
+        { "support_conical_base_flare_width", 0 },
+        { "support_conical_base_flare_height", 10 }
     };
 
     DynamicPrintConfig straight_config = DynamicPrintConfig::full_print_config();
@@ -75,12 +78,38 @@ TEST_CASE("Conical grid support narrows toward the build plate", "[SupportMateri
     Print conical;
     init_and_process_print({ pedestal }, conical, conical_config);
 
+    DynamicPrintConfig flared_config = conical_config;
+    flared_config.set_key_value("support_conical_base_flare_width", new ConfigOptionFloat(5.));
+    Print flared;
+    init_and_process_print({ pedestal }, flared, flared_config);
+
+    DynamicPrintConfig no_top_cone_config = conical_config;
+    no_top_cone_config.set_key_value("support_conical_min_width", new ConfigOptionFloat(100.));
+    Print no_top_cone;
+    init_and_process_print({ pedestal }, no_top_cone, no_top_cone_config);
+    DynamicPrintConfig no_top_cone_flared_config = no_top_cone_config;
+    no_top_cone_flared_config.set_key_value("support_conical_base_flare_width", new ConfigOptionFloat(5.));
+    Print no_top_cone_flared;
+    init_and_process_print({ pedestal }, no_top_cone_flared, no_top_cone_flared_config);
+
     const SupportLayer *straight_low = support_layer_near_z(straight, 2.);
     const SupportLayer *conical_low  = support_layer_near_z(conical, 2.);
     const SupportLayer *conical_high = support_layer_near_z(conical, 58.);
+    const SupportLayer *flared_low   = support_layer_near_z(flared, 2.);
+    const SupportLayer *flared_mid   = support_layer_near_z(flared, 6.);
+    const SupportLayer *flared_waist = support_layer_near_z(flared, 10.);
+    const SupportLayer *flared_high  = support_layer_near_z(flared, 58.);
+    const SupportLayer *no_top_cone_low = support_layer_near_z(no_top_cone, 2.);
+    const SupportLayer *no_top_cone_flared_low = support_layer_near_z(no_top_cone_flared, 2.);
     REQUIRE(straight_low != nullptr);
     REQUIRE(conical_low != nullptr);
     REQUIRE(conical_high != nullptr);
+    REQUIRE(flared_low != nullptr);
+    REQUIRE(flared_mid != nullptr);
+    REQUIRE(flared_waist != nullptr);
+    REQUIRE(flared_high != nullptr);
+    REQUIRE(no_top_cone_low != nullptr);
+    REQUIRE(no_top_cone_flared_low != nullptr);
 
     const double straight_area_low = area(straight_low->support_islands);
     const double conical_area_low  = area(conical_low->support_islands);
@@ -92,6 +121,17 @@ TEST_CASE("Conical grid support narrows toward the build plate", "[SupportMateri
     REQUIRE(conical_area_low < conical_area_high);
     REQUIRE(unscaled(unscaled(conical_area_low)) < 500.);
     REQUIRE(conical_low->support_islands.size() == 2);
+
+    const double flared_area_low   = area(flared_low->support_islands);
+    const double flared_area_mid   = area(flared_mid->support_islands);
+    const double flared_area_waist = area(flared_waist->support_islands);
+    const double flared_area_high  = area(flared_high->support_islands);
+    REQUIRE(flared_area_low > conical_area_low);
+    REQUIRE(flared_area_low > flared_area_mid);
+    REQUIRE(flared_area_mid > flared_area_waist);
+    REQUIRE(std::abs(flared_area_high - conical_area_high) < 0.01 * conical_area_high);
+    REQUIRE(flared_low->support_islands.size() == 2);
+    REQUIRE(area(no_top_cone_flared_low->support_islands) == area(no_top_cone_low->support_islands));
 
     size_t sampled_layers = 0;
     size_t changing_layers = 0;
@@ -117,6 +157,56 @@ TEST_CASE("Conical grid support narrows toward the build plate", "[SupportMateri
             REQUIRE(current_area < 1.1 * previous_top_area);
         previous_top_area = current_area;
     }
+
+    // A support which starts below the flare height is not part of a tall
+    // column and must keep the same profile as conical support without a flare.
+    TriangleMesh short_support_model = make_cube(5., 20., 4.);
+    TriangleMesh short_support_roof  = make_cube(30., 20., 2.);
+    short_support_roof.translate(-12.5f, 0.f, 4.f);
+    short_support_model.merge(short_support_roof);
+
+    Print short_conical;
+    init_and_process_print({ short_support_model }, short_conical, conical_config);
+    Print short_flared;
+    init_and_process_print({ short_support_model }, short_flared, flared_config);
+
+    const SupportLayer *short_conical_low = support_layer_near_z(short_conical, 0.2);
+    const SupportLayer *short_flared_low  = support_layer_near_z(short_flared, 0.2);
+    REQUIRE(short_conical_low != nullptr);
+    REQUIRE(short_flared_low != nullptr);
+    REQUIRE(area(short_flared_low->support_islands) == area(short_conical_low->support_islands));
+
+    // A tall support may flare away from the model, but the flare must not
+    // grow underneath a widening model base and turn its short supports into
+    // reverse cones.
+    TriangleMesh widening_base = make_pyramid(12.f, 10.f);
+    widening_base.rotate_x(float(PI));
+    widening_base.translate(0.f, 0.f, 10.f);
+    TriangleMesh widening_stem = make_cube(6., 6., 52.);
+    widening_stem.translate(-3.f, -3.f, 10.f);
+    widening_base.merge(widening_stem);
+    TriangleMesh widening_roof = make_cube(40., 20., 5.);
+    widening_roof.translate(-20.f, -10.f, 62.f);
+    widening_base.merge(widening_roof);
+
+    Print widening_conical;
+    init_and_process_print({ widening_base }, widening_conical, conical_config);
+    Print widening_flared;
+    init_and_process_print({ widening_base }, widening_flared, flared_config);
+
+    const SupportLayer *widening_conical_low = support_layer_near_z(widening_conical, 2.);
+    const SupportLayer *widening_flared_low  = support_layer_near_z(widening_flared, 2.);
+    REQUIRE(widening_conical_low != nullptr);
+    REQUIRE(widening_flared_low != nullptr);
+    const Polygon widening_base_shadow = Polygon::new_scale({
+        { -6., -6. }, { 6., -6. }, { 6., 6. }, { -6., 6. }
+    });
+    const double widening_flared_shadow_area =
+        area(intersection(widening_flared_low->support_islands, Polygons{ widening_base_shadow }));
+    const double widening_conical_shadow_area =
+        area(intersection(widening_conical_low->support_islands, Polygons{ widening_base_shadow }));
+    REQUIRE(widening_flared_shadow_area <= widening_conical_shadow_area);
+    REQUIRE(unscaled(unscaled(widening_conical_shadow_area - widening_flared_shadow_area)) < 2.);
 }
 
 TEST_CASE("Conical build plate support reaches around lower geometry", "[SupportMaterial]")
@@ -150,7 +240,9 @@ TEST_CASE("Conical build plate support reaches around lower geometry", "[Support
         { "support_threshold_angle",       45 },
         { "support_conical_enabled",       1 },
         { "support_conical_angle",         30 },
-        { "support_conical_min_width",     5 }
+        { "support_conical_min_width",     5 },
+        { "support_conical_base_flare_width", 0 },
+        { "support_conical_base_flare_height", 10 }
     });
     Print everywhere;
     init_and_process_print({ model }, everywhere, everywhere_config);

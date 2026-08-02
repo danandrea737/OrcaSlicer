@@ -845,7 +845,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     const bool conical_support_enabled = conical_support_available && config->opt_bool("support_conical_enabled");
     toggle_field("support_conical_angle", conical_support_enabled);
     toggle_field("support_conical_min_width", conical_support_enabled && config->opt_float("support_conical_angle") > 0.);
-    for (auto el : { "support_conical_enabled", "support_conical_angle", "support_conical_min_width" })
+    const bool conical_base_flare_enabled = conical_support_enabled && config->opt_float("support_conical_angle") > 0. &&
+                                            config->opt_float("support_conical_base_flare_width") > 0.;
+    toggle_field("support_conical_base_flare_width", conical_support_enabled && config->opt_float("support_conical_angle") > 0.);
+    toggle_field("support_conical_base_flare_height", conical_base_flare_enabled);
+    for (auto el : { "support_conical_enabled", "support_conical_angle", "support_conical_min_width", "support_conical_base_flare_width", "support_conical_base_flare_height" })
         toggle_line(el, !support_is_tree);
 
     // hide settings that are not used by tree supports

@@ -1132,6 +1132,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_conical_enabled))
     ((ConfigOptionFloat,               support_conical_angle))
     ((ConfigOptionFloat,               support_conical_min_width))
+    ((ConfigOptionFloat,               support_conical_base_flare_width))
+    ((ConfigOptionFloat,               support_conical_base_flare_height))
     ((ConfigOptionFloatsNullable,      support_speed))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
 

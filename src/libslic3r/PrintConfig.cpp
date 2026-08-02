@@ -6923,6 +6923,24 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(5));
 
+    def = this->add("support_conical_base_flare_width", coFloat);
+    def->label = L("Conical support base flare width");
+    def->category = L("Support");
+    def->tooltip = L("Maximum outward expansion per side of conical support at the build plate. Set this to 0 to disable the flare.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("support_conical_base_flare_height", coFloat);
+    def->label = L("Conical support base flare height");
+    def->category = L("Support");
+    def->tooltip = L("Height above the build plate over which the base flare tapers back to the regular conical support profile.");
+    def->sidetext = L("mm");
+    def->min = 0.1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10));
+
     def = this->add("support_speed", coFloats);
     def->label = L("Support");
     def->category = L("Speed");

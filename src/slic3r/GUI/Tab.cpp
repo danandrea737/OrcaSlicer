@@ -2974,6 +2974,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_conical_enabled", "support_settings_advanced");
         optgroup->append_single_option_line("support_conical_angle", "support_settings_advanced");
         optgroup->append_single_option_line("support_conical_min_width", "support_settings_advanced");
+        optgroup->append_single_option_line("support_conical_base_flare_width", "support_settings_advanced");
+        optgroup->append_single_option_line("support_conical_base_flare_height", "support_settings_advanced");
         //optgroup->append_single_option_line("support_interface_loop_pattern", "support_settings_advanced");
 
         optgroup->append_single_option_line("support_object_xy_distance", "support_settings_advanced#supportobject-xy-distance");

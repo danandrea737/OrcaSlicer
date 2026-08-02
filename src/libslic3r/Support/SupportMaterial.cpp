@@ -2632,6 +2632,18 @@ static inline ProjectedSupport project_support_to_grid(
 // slice is offset from the slice above according to the configured angle. Keep
 // features below the minimum width unchanged so shrinking a support column
 // cannot make a narrow island disappear.
+static Polygons conical_support_minimum_width_features(const Polygons &polygons, coordf_t minimum_width)
+{
+    if (polygons.empty() || minimum_width <= 0.)
+        return {};
+
+    const float half_minimum_width = float(scale_(0.5 * minimum_width));
+    Polygons inset = offset(polygons, -half_minimum_width);
+    // The tiny extra expansion avoids retaining boundary slivers produced by
+    // the two inverse offsets.
+    return diff(polygons, offset(inset, half_minimum_width + 20.f));
+}
+
 static Polygons apply_conical_support_offset(
     const Polygons &polygons,
     coordf_t        layer_delta_z,
@@ -2646,16 +2658,112 @@ static Polygons apply_conical_support_offset(
     Polygons tapered = offset(polygons, offset_scaled);
 
     if (offset_scaled < 0.f && minimum_width > 0.) {
-        const float half_minimum_width = float(scale_(0.5 * minimum_width));
-        Polygons inset = offset(polygons, -half_minimum_width);
-        // The tiny extra expansion avoids retaining boundary slivers produced
-        // by the two inverse offsets.
-        Polygons small_parts = diff(polygons, offset(inset, half_minimum_width + 20.f));
+        Polygons small_parts = conical_support_minimum_width_features(polygons, minimum_width);
         polygons_append(tapered, std::move(small_parts));
         tapered = union_(tapered);
     }
 
     return tapered;
+}
+
+static Polygons apply_conical_support_offset_and_track_taper(
+    const Polygons &polygons,
+    Polygons       &taper_history,
+    coordf_t        layer_delta_z,
+    coordf_t        angle_degrees,
+    coordf_t        minimum_width)
+{
+    Polygons tapered = apply_conical_support_offset(polygons, layer_delta_z, angle_degrees, minimum_width);
+    if (polygons.empty() || layer_delta_z <= 0. || angle_degrees <= 0.)
+        return tapered;
+
+    if (! taper_history.empty())
+        taper_history = apply_conical_support_offset(taper_history, layer_delta_z, angle_degrees, minimum_width);
+
+    Polygons removed = diff(polygons, tapered);
+    if (! removed.empty()) {
+        const float connection_radius = float(scale_(std::tan(Geometry::deg2rad(angle_degrees)) * layer_delta_z)) +
+                                        float(SCALED_EPSILON);
+        Polygons changed_neighborhood = offset(removed, connection_radius);
+        for (const ExPolygon &component : union_ex(tapered)) {
+            Polygons component_polygons = to_polygons(component);
+            if (! intersection(component_polygons, changed_neighborhood).empty())
+                polygons_append(taper_history, std::move(component_polygons));
+        }
+    }
+
+    if (! taper_history.empty())
+        taper_history = intersection(union_(taper_history), tapered);
+    return tapered;
+}
+
+static Polygons retain_flare_components_anchored_to_waist(
+    const Polygons &flare_projection,
+    const Polygons &waist_projection)
+{
+    if (flare_projection.empty() || waist_projection.empty())
+        return {};
+
+    Polygons anchored;
+    for (const ExPolygon &component : union_ex(flare_projection)) {
+        Polygons component_polygons = to_polygons(component);
+        if (! intersection(component_polygons, waist_projection).empty())
+            polygons_append(anchored, std::move(component_polygons));
+    }
+    return anchored;
+}
+
+static Polygons apply_conical_support_offset_for_layer(
+    const Polygons &polygons,
+    Polygons       &taper_history,
+    Polygons       &base_flare_projection,
+    Polygons       &base_flare_waist_projection,
+    const Polygons &base_flare_exclusion,
+    coordf_t        lower_z,
+    coordf_t        upper_z,
+    coordf_t        angle_degrees,
+    coordf_t        minimum_width,
+    coordf_t        base_top_z,
+    coordf_t        base_flare_angle_degrees)
+{
+    if (polygons.empty() || upper_z <= lower_z || angle_degrees == 0.)
+        return polygons;
+
+    if (angle_degrees <= 0. || base_top_z <= 0. || base_flare_angle_degrees <= 0.)
+        return apply_conical_support_offset(polygons, upper_z - lower_z, angle_degrees, minimum_width);
+
+    if (lower_z >= base_top_z)
+        return apply_conical_support_offset_and_track_taper(
+            polygons, taper_history, upper_z - lower_z, angle_degrees, minimum_width);
+
+    Polygons tapered = polygons;
+    if (upper_z > base_top_z) {
+        const coordf_t upper_delta = upper_z - std::max(lower_z, base_top_z);
+        tapered = apply_conical_support_offset_and_track_taper(
+            tapered, taper_history, upper_delta, angle_degrees, minimum_width);
+    }
+
+    // A base flare is only paired with a support column which first tapered
+    // from a wider region and then reached its configured minimum-width shaft.
+    if (upper_z >= base_top_z && base_flare_projection.empty()) {
+        Polygons minimum_width_features = conical_support_minimum_width_features(tapered, minimum_width);
+        base_flare_projection = intersection(minimum_width_features, taper_history);
+        base_flare_waist_projection = base_flare_projection;
+    }
+
+    const coordf_t lower_delta = std::min(upper_z, base_top_z) - lower_z;
+    Polygons normally_tapered = apply_conical_support_offset(tapered, lower_delta, angle_degrees, minimum_width);
+    if (! base_flare_projection.empty()) {
+        base_flare_projection = apply_conical_support_offset(
+            base_flare_projection, lower_delta, -base_flare_angle_degrees, minimum_width);
+        if (! base_flare_exclusion.empty())
+            base_flare_projection = diff(base_flare_projection, base_flare_exclusion);
+        base_flare_projection = retain_flare_components_anchored_to_waist(
+            base_flare_projection, base_flare_waist_projection);
+        polygons_append(normally_tapered, base_flare_projection);
+        normally_tapered = union_(normally_tapered);
+    }
+    return normally_tapered;
 }
 
 // Generate bottom contact layers supporting the top contact layers.
@@ -2694,23 +2802,65 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
     const bool conical_support = m_object_config->enable_support.value &&
                                  m_object_config->support_conical_enabled.value &&
                                  m_object_config->support_conical_angle.value != 0.;
+    coordf_t conical_base_top_z           = 0.;
+    coordf_t conical_base_flare_angle_deg = 0.;
+    Polygons conical_taper_history;
+    Polygons conical_taper_enforcers_history;
+    Polygons conical_base_flare_projection;
+    Polygons conical_base_flare_enforcers_projection;
+    Polygons conical_base_flare_waist_projection;
+    Polygons conical_base_flare_enforcers_waist_projection;
+    Polygons conical_base_flare_object_shadow;
+    if (conical_support &&
+        m_object_config->support_conical_angle.value > 0. &&
+        m_object_config->support_conical_base_flare_width.value > 0. &&
+        m_object_config->support_conical_base_flare_height.value > 0.) {
+        const coordf_t flare_height = m_object_config->support_conical_base_flare_height.value;
+        conical_base_top_z = object.layers().front()->print_z + flare_height;
+        conical_base_flare_angle_deg = Geometry::rad2deg(std::atan(
+            m_object_config->support_conical_base_flare_width.value / flare_height));
+        for (const Layer *object_layer : object.layers()) {
+            if (object_layer->print_z > conical_base_top_z + EPSILON)
+                break;
+            polygons_append(conical_base_flare_object_shadow, to_polygons(object_layer->lslices));
+        }
+        conical_base_flare_object_shadow = union_(conical_base_flare_object_shadow);
+    }
     // Last top contact layer visited when collecting the projection of contact areas.
     int       contact_idx = int(top_contacts.size()) - 1;
     for (int layer_id = int(object.total_layer_count()) - 2; layer_id >= 0; -- layer_id) {
         BOOST_LOG_TRIVIAL(trace) << "Support generator - bottom_contact_layers - layer " << layer_id;
         const Layer &layer = *object.get_layer(layer_id);
         if (conical_support) {
-            const coordf_t layer_delta_z = object.get_layer(layer_id + 1)->print_z - layer.print_z;
+            const coordf_t upper_z = object.get_layer(layer_id + 1)->print_z;
+            Polygons base_flare_exclusion;
+            if (conical_base_flare_angle_deg > 0. && layer.print_z < conical_base_top_z && ! conical_base_flare_object_shadow.empty()) {
+                const coordf_t flare_expansion = std::tan(Geometry::deg2rad(conical_base_flare_angle_deg)) *
+                                                  (conical_base_top_z - layer.print_z);
+                base_flare_exclusion = offset(conical_base_flare_object_shadow, float(scale_(flare_expansion)));
+            }
             if (! overhangs_projection.empty())
-                overhangs_projection = apply_conical_support_offset(
-                    overhangs_projection, layer_delta_z,
+                overhangs_projection = apply_conical_support_offset_for_layer(
+                    overhangs_projection, conical_taper_history,
+                    conical_base_flare_projection,
+                    conical_base_flare_waist_projection,
+                    base_flare_exclusion,
+                    layer.print_z, upper_z,
                     m_object_config->support_conical_angle.value,
-                    m_object_config->support_conical_min_width.value);
+                    m_object_config->support_conical_min_width.value,
+                    conical_base_top_z,
+                    conical_base_flare_angle_deg);
             if (! enforcers_projection.empty())
-                enforcers_projection = apply_conical_support_offset(
-                    enforcers_projection, layer_delta_z,
+                enforcers_projection = apply_conical_support_offset_for_layer(
+                    enforcers_projection, conical_taper_enforcers_history,
+                    conical_base_flare_enforcers_projection,
+                    conical_base_flare_enforcers_waist_projection,
+                    base_flare_exclusion,
+                    layer.print_z, upper_z,
                     m_object_config->support_conical_angle.value,
-                    m_object_config->support_conical_min_width.value);
+                    m_object_config->support_conical_min_width.value,
+                    conical_base_top_z,
+                    conical_base_flare_angle_deg);
         }
         // Collect projections of all contact areas above or at the same level as this top surface.
 #ifdef SLIC3R_DEBUG
@@ -2817,6 +2967,15 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
             });
 
         task_group.wait();
+
+        if (! conical_taper_history.empty())
+            conical_taper_history = intersection(conical_taper_history, overhangs_projection);
+        if (! conical_taper_enforcers_history.empty())
+            conical_taper_enforcers_history = intersection(conical_taper_enforcers_history, enforcers_projection);
+        if (! conical_base_flare_projection.empty())
+            conical_base_flare_projection = intersection(conical_base_flare_projection, overhangs_projection);
+        if (! conical_base_flare_enforcers_projection.empty())
+            conical_base_flare_enforcers_projection = intersection(conical_base_flare_enforcers_projection, enforcers_projection);
 
         if (! layer_support_area_enforcers.empty()) {
             if (layer_support_area.empty())
